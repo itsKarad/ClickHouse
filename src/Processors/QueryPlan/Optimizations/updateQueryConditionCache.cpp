@@ -92,6 +92,11 @@ void updateQueryConditionCache(const Stack & stack, const QueryPlanOptimizationS
     if (!read_from_merge_tree)
         return;
 
+    /// A TopK read disabled the cache because its sort-column default is evaluated by the reader. Do not tag its
+    /// WHERE filter either: `FilterStep` writes these entries independently of the cache used by the read itself.
+    if (read_from_merge_tree->isSelectedForTopKFilterOptimization() && !read_from_merge_tree->isQueryConditionCacheAllowed())
+        return;
+
     /// The query condition cache for `ORDER BY ... LIMIT N` (TopK) reads is gated behind the
     /// `use_query_condition_cache_for_top_k` setting (enabled by default). When it is off, skip the
     /// QCC write for the WHERE filter of a TopK read: such reads can drop granules during execution

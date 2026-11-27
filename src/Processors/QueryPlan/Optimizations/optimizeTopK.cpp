@@ -23,6 +23,7 @@
 #include <Functions/FunctionsLogical.h>
 #include <Functions/IFunctionAdaptors.h>
 #include <Functions/FunctionTopKFilter.h>
+#include <Storages/ColumnsDescription.h>
 
 namespace DB::QueryPlanOptimizations
 {
@@ -124,6 +125,27 @@ static size_t tryTopKForFormatSource(
     source_step->setTopKFilter(std::move(info));
 
     return 0;
+}
+
+/// A part without the sort column gets its value from the default inside `MergeTreeReader`. The default can observe
+/// data that changes between queries (e.g. `joinGet`), so a TopK cache entry can exclude marks needed by a later
+/// boundary. Keep the dynamic filter, which uses the current values, but disable query condition caching.
+static bool sortColumnUsesReadTimeDefault(const ReadFromMergeTree & read_step, const String & sort_column_name)
+{
+    const auto & columns = read_step.getStorageMetadata()->getColumns();
+    const auto column = columns.tryGetColumnOrSubcolumn(GetColumnsOptions::AllPhysical, sort_column_name);
+    if (!column)
+        return false;
+
+    const auto storage_column_name = column->getNameInStorage();
+    if (!columns.hasDefault(storage_column_name))
+        return false;
+
+    for (const auto & part : read_step.getParts())
+        if (!part.data_part->getColumnPosition(storage_column_name))
+            return true;
+
+    return false;
 }
 
 size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes*/, const Optimization::ExtraSettings & settings)
@@ -350,6 +372,9 @@ size_t tryOptimizeTopK(QueryPlan::Node * parent_node, QueryPlan::Nodes & /*nodes
 
     if (use_skip_index || use_dynamic_filtering)
     {
+        if (sortColumnUsesReadTimeDefault(*read_from_mergetree_step, sort_column_name))
+            read_from_mergetree_step->disableQueryConditionCache();
+
         TopKFilterInfo info{sort_column_name, sort_column.type, num_sort_columns, n, sort_col_desc.direction, where_clause, threshold_tracker, /*condition_hash=*/ 0, /*dynamic_filter_pending=*/ use_dynamic_filtering};
         if (use_dynamic_filtering && single_string_sort_column)
             info.rows_equal_to_threshold_dropped = std::make_shared<std::atomic<bool>>(false);
